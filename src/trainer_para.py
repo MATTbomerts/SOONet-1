@@ -5,8 +5,10 @@ from tqdm import tqdm
 import torch
 from torch.optim import AdamW, lr_scheduler
 
-from .models import SOONet
+# from .models_para import SOONet
+from .models.models_para import SOONet
 from .utils import Evaluator, get_logger
+from torch.nn.parallel import DataParallel
 
 
 class Trainer(object):
@@ -14,6 +16,9 @@ class Trainer(object):
     def __init__(self, mode, save_or_load_path, cfg):
         self.device = torch.device(cfg.device_id) if torch.cuda.is_available() else torch.device("cpu")
         self.model = SOONet(cfg)
+        device_ids = [0, 1,2,3,4,5,6]  #改成2个，scale_boundaries就变成元素个数为3，改成4个，元素个数变为2
+        self.model = DataParallel(self.model, device_ids=device_ids)
+        self.model = self.model.cuda()
         
         self.evaluator = Evaluator(tiou_threshold=cfg.TEST.EVAL_TIOUS, topks=cfg.TEST.EVAL_TOPKS)
 
@@ -51,7 +56,7 @@ class Trainer(object):
 
     def train(self, train_loader, test_loader):
         logger = get_logger("TRAIN", log_file_path=os.path.join(self.log_dir, "train.log"))
-        self.model.to(self.device)
+        
         self.train_epoch(0, train_loader, test_loader, logger, self.cfg)
 
 
@@ -70,7 +75,7 @@ class Trainer(object):
 
         all_rank, miou = self.eval_epoch(test_loader)
         for k, v in all_rank.items():
-            logger.info("{}: {:.4f}".format(k, v))
+            logger.info("{}: {:.4f}".format(k, v.item()))
 
 
     def test(self, test_loader):
@@ -122,9 +127,17 @@ class Trainer(object):
 
         best_r1 = 0
         # for i, batch in enumerate(train_loader):
-        #train_loader是从dataset中的self.sample拿数据,sample数据本身就是包含了epoch信息，已经将每个视频重复了epoch次
-        #因此从train_loader中拿的数据就是epoch次的数据，不需要再重复epoch次
         for i, batch in enumerate(tqdm(train_loader, desc="Training Progress", unit="batch")):
+            # print("xxxxxxxxxxxxx")
+            # print("query_feats shape: {}".format(batch["query_feats"].shape))
+            # print("video_feats shape: {}".format(batch["video_feats"].shape))
+            # print("scale_boundaries shape: {}".format(batch["scale_boundaries"].shape))
+            # print("start_ts shape: {}".format(batch["starts"].shape))
+            # print("overlaps shape: {}".format(batch["overlaps"].shape))
+            # # print("scale_boundaries: {}".format(batch["scale_boundaries"]))  #貌似没有batch维度
+            # print(batch["starts"][0]==batch["starts"][1])
+            # print(batch["starts"][10]==batch["starts"][3])
+            #实际上starts和end都是video centric的，在同一个视频下，不同的query，都是一样的，但唯独scale_boundaries没有batch维度
             loss_dict = self.model(
                 query_feats=batch["query_feats"].to(self.device), 
                 query_masks=batch["query_masks"].to(self.device), 
@@ -145,7 +158,8 @@ class Trainer(object):
             if i % cfg.TRAIN.LOG_STEP == 0:
                 log_str = f"Step: {i}, "
                 for k, v in loss_dict.items():
-                    log_str += "{}: {:.3f}, ".format(k, v)
+                    # print("k: {}, v: {}".format(k, v))
+                    log_str += "{}: {:.3f}, ".format(k, v.item())
                 logger.info(log_str[:-2])
             
             if i > 0 and i % cfg.TRAIN.EVAL_STEP == 0:
@@ -153,7 +167,7 @@ class Trainer(object):
 
                 logger.info("step: {}".format(i))
                 for k, v in all_rank.items():
-                    logger.info("{}: {:.4f}".format(k, v))
+                    logger.info("{}: {:.4f}".format(k, v.item()))
 
                 r1 = all_rank["R1-0.5"]
                 if r1 > best_r1:

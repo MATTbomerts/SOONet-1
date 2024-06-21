@@ -10,20 +10,23 @@ from ..utils import fetch_feats_by_index
 
 class Q2VRankerStage1(nn.Module):
 
-    def __init__(self, nlevel, hidden_dim):
+    def __init__(self, nlevel, hidden_dim): #nlevel就是尺度数
         super().__init__()
         self.fc = nn.Linear(hidden_dim, hidden_dim)
         self.nlevel = nlevel
 
     def forward(self, ctx_feats, qfeat):
-        qfeat = self.fc(qfeat)
+        qfeat = self.fc(qfeat)  #bsz 每一个query与同一个视频进行计算，重复利用
         qv_ctx_scores = list()
         for i in range(self.nlevel):
+            #F.normalize(input, p=2, dim=1)表示对input的第1维度进行L2（p=2)归一化
+            #爱因斯坦求和（einsum），"bld,bd->bl"表示张量间的乘法操作 b表示batch_size, l表示序列长度，d表示维度
+            #计算的是 ctx_feats[i]中每个时间步的特征向量与qfeat特征向量之间的余弦相似度，得到的分数维度是(batch_size, frames_len)
             score = torch.einsum("bld,bd->bl", 
                     F.normalize(ctx_feats[i], p=2, dim=2), F.normalize(qfeat, p=2, dim=1))
             qv_ctx_scores.append(score)
 
-        return qv_ctx_scores
+        return qv_ctx_scores  #计算每一个anchor和query之间的得分，其中query有多个
 
 
 class V2QRankerStage1(nn.Module):
@@ -36,6 +39,7 @@ class V2QRankerStage1(nn.Module):
     def forward(self, ctx_feats, qfeat):
         vq_ctx_scores = list()
         for i in range(self.nlevel):
+            #与前面的区别在于这里是先对ctx_feats[i]进行线性变换，然后再进行归一化，Q2VRankerStage1是对query进行线性变换再进行计算
             score = torch.einsum("bld,bd->bl", 
                     F.normalize(self.fc(ctx_feats[i]), p=2, dim=2), F.normalize(qfeat, p=2, dim=1))
             vq_ctx_scores.append(score)
@@ -59,19 +63,23 @@ class Q2VRankerStage2(nn.Module):
         qv_ctn_scores = list()
         qv_merge_scores = list()
 
-        _, L, D = vfeats.size()
+        _, L, D = vfeats.size()  #没有进行维度转换
         ctn_feats = list()
         for i in range(self.nlevel):
-            snippet_length = self.base_snippet_length * 2**i
+            snippet_length = self.base_snippet_length * 2**i  #和dataloader中的处理方式一样
             assert L // snippet_length == qv_ctx_scores[i].size(1), \
                 "{}, {}, {}, {}".format(i, L, snippet_length, qv_ctx_scores[i].size())
             
+            #此部分还是视频的特征，没有content-based,也要将视频划分为不同的区间
             ctn_feat = vfeats.view(L//snippet_length, snippet_length, D).detach()
             if self.training:
                 qv_ctx_score = torch.index_select(qv_ctx_scores[i], 1, hit_indices[i])
-                ctn_feat = torch.index_select(ctn_feat, 0, hit_indices[i])
+                ctn_feat = torch.index_select(ctn_feat, 0, hit_indices[i])  #0,表示没有bsz维度，将有相交部分的内容选出来，得到的还是tensor张量只不过行数变少
+                #多个anchor一起编码 (selected_anchors, snippet_length, D)
+                #encoder经检验不会改变输入数据的维度，即输出仍为(selected_anchors, snippet_length, D)
                 ctn_feat = self.encoder(ctn_feat, torch.ones(ctn_feat.size()[:2], device=ctn_feat.device))
-                ctn_feat = ctn_feat.unsqueeze(0)
+                ctn_feat = ctn_feat.unsqueeze(0)  #构造出一个batch_size维度 (1,selected_anchors, snippet_length, D)
+                
             else:
                 qv_ctx_score = fetch_feats_by_index(qv_ctx_scores[i], hit_indices[i])
                 B, K = hit_indices[i].shape
@@ -79,7 +87,9 @@ class Q2VRankerStage2(nn.Module):
                 ctn_feat = self.encoder(ctn_feat, torch.ones(ctn_feat.size()[:2], device=ctn_feat.device))
                 ctn_feat = ctn_feat.view(B, K, snippet_length, D)
             
-            ctn_feats.append(ctn_feat)
+            ctn_feats.append(ctn_feat)  #每个尺度下都添加到ctn中，列表中四个元素，每个元素(1,selected_anchors, snippet_length, D)
+            
+            # 下面计算content-based与文本的分数
             qv_ctn_score = torch.einsum("bkld,bd->bkl", 
                            F.normalize(ctn_feat, p=2, dim=3), F.normalize(qfeat, p=2, dim=1))
             if self.pool == "mean":
@@ -91,7 +101,7 @@ class Q2VRankerStage2(nn.Module):
             qv_ctn_scores.append(qv_ctn_score)
             qv_merge_scores.append(qv_ctx_score + qv_ctn_score)
         
-        return qv_merge_scores, qv_ctn_scores, ctn_feats
+        return qv_merge_scores, qv_ctn_scores, ctn_feats  #ctn_feats还是列表，内部每个元素维度为(selected_anchors, snippet_length, D)
 
 
 class V2QRankerStage2(nn.Module):
@@ -151,23 +161,39 @@ class BboxRegressor(nn.Module):
             )
         self.enable_stage2 = enable_stage2
 
-    def forward(self, ctx_feats, ctn_feats, qfeat):
+    def forward(self, ctx_feats, ctn_feats, qfeat): 
+        """_summary_
+
+        Args:
+            ctx_feats (_list_]): 长度为尺度数，每个元素为在该尺度下的(1,selected_anchors,hidden_dim)
+            ctn_feats (_list_):  长度为尺度数，每个元素为在该尺度下的(1,selected_anchors,snippet_length,hidden_dim)
+            qfeat (_torch_): 文本特征
+
+        Returns:
+            _torch_: 维度(query_length, total_num_anchors, 2)
+        """
+        #传入的ctx,ctn都是列表，列表中的元素才是特征，每个特征的维度保持一致
         qfeat = self.fc_q(qfeat)
-
-        ctx_feats = torch.cat(ctx_feats, dim=1)
-        ctx_fuse_feats = F.relu(self.fc_ctx(ctx_feats)) * F.relu(qfeat.unsqueeze(1))
-
+        #(1,total_num_anchors,hidden_dim) 所有尺度下anchor数目加起来，因为anchor没有长度，所以可以直接合并
+        ctx_feats = torch.cat(ctx_feats, dim=1) 
+        #模态交互点积操作 (query_length, total_num_anchors, hidden_dim)
+        ctx_fuse_feats = F.relu(self.fc_ctx(ctx_feats)) * F.relu(qfeat.unsqueeze(1))  #在这里query_length应该指的是bsz
         if self.enable_stage2 and ctn_feats:
             ctn_fuse_feats = list()
-            for i in range(len(ctn_feats)):
+            #每个元素(1，selected_anchors, snippet_length, D)
+            for i in range(len(ctn_feats)):  #长度就是scale的数目,每一个尺度下的ctn_feat维度为(1,selected_anchors,snippet_length,hidden_dim)
+                #将query的维度广播，video anchor的维度不变(1,selected_anchors,snippet_length,hidden_dim)
                 out = F.relu(self.fc_ctn(ctn_feats[i])) * F.relu(qfeat.unsqueeze(1).unsqueeze(1))
-                out = self.attn(out)
-                ctn_fuse_feats.append(out)
-            ctn_fuse_feats = torch.cat(ctn_fuse_feats, dim=1)
-            fuse_feats = torch.cat([ctx_fuse_feats, ctn_fuse_feats], dim=-1)
+                out = self.attn(out) #在attn中消除snippet_lenghth的原理
+                ctn_fuse_feats.append(out) 
+                
+            #(query_length, total_num_anchors, hidden_dim) 第一个维度是多少个query，第二个维度为每个query和每个anchor的得分
+            ctn_fuse_feats = torch.cat(ctn_fuse_feats, dim=1) #因为要cat起来，那应该没有snippet_length这个维度，在attn中已经解决
+            fuse_feats = torch.cat([ctx_fuse_feats, ctn_fuse_feats], dim=-1) #hidden_dim拼接
         else:
             fuse_feats = ctx_fuse_feats
         
+        #最终结果为 (query_length, total_num_anchors, 2)即对每个anchor都进行了时间边界的预测
         out = self.predictor(fuse_feats)
         return out
 
@@ -178,12 +204,14 @@ class SelfAttention(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(hidden_dim, hidden_dim//2)
         self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_dim//2, 1)
+        self.fc2 = nn.Linear(hidden_dim//2, 1) #将最后一个hidden_dim转变为1
 
     def forward(self, x):
-        att = self.fc2(self.relu(self.fc1(x))).squeeze(3)
-        att = F.softmax(att, dim=2).unsqueeze(3)
-        out = torch.sum(x * att, dim=2)
+        #因为x中包含snippet length维度，会计算得到片段内每一帧与文本查询的相似度，从整体片段为单位来看，需要将维度合并
+        att = self.fc2(self.relu(self.fc1(x))).squeeze(3) 
+        att = F.softmax(att, dim=2).unsqueeze(3)  #又将最后一个维度加回来
+        out = torch.sum(x * att, dim=2) #x * att 广播机制，对att最后一个维度复制到x最后一个维度数
+        #通过sum函数将snippet_length维度消除掉，相当于对每一个anchor内部的帧的相似度求和得到一个结果
         return out
 
 

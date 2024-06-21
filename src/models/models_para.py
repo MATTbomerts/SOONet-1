@@ -6,7 +6,7 @@ from .blocks import *
 from .swin_transformer import SwinTransformerV2_1D
 from .loss import *
 from ..utils import fetch_feats_by_index, compute_tiou
-import time
+
 
 class SOONet(nn.Module):
 
@@ -53,7 +53,7 @@ class SOONet(nn.Module):
         self.stage2_topk = stage2_topk  #在测试阶段才使用了top-k 100
         self.cfg = cfg
         self.topk = topk  # 100
-        self.enable_nms = cfg.MODEL.ENABLE_NMS #false
+        self.enable_nms = cfg.MODEL.ENABLE_NMS
 
 
     def forward(self, **kwargs):
@@ -62,6 +62,7 @@ class SOONet(nn.Module):
         else:
             return self.forward_test(**kwargs)
     
+
     def forward_train(self, 
                       query_feats=None,
                       query_masks=None,
@@ -73,8 +74,7 @@ class SOONet(nn.Module):
                       timestamps=None,
                       anchor_masks=None,
                       **kwargs):
-        
-        #基于sentence的query特征，没有用到query_masks参数
+
         sent_feat = query_feats #bsz 一个视频下选择了多个query，每一行都是一个query
         #ctx表示context-based? 经过video encoder之后就变成多尺度  输入时bsz, hidden_dim, frames
         #ctx_feats是一个列表，每个元素是(1,anchor_num,hidden_dim) ，anchor_num随着尺度长度的变化而变化,1表示bsz
@@ -90,12 +90,11 @@ class SOONet(nn.Module):
             #re-ranking阶段选出有重叠的片段 （论文中不是说top-m嘛？这个参数在哪里使用了？）
             for i in range(self.nscales): #每一个尺度下进行遍历
                 #经测试一个(1,80,64)和(1,160,64)的向量输出的结果窗口尺寸的确是10，20，40，80，和dataloader部分的处理结果一致
-                #按照这里的写法来说，应该scale_boundaries也是没有bsz维度
-                scale_first = scale_boundaries[i]  #这里的scale和swin transformer得到的scale是对应的嘛
+                #scale_boundaries扩充了bsz维度，但是每一行数据都是一样的，所以取第一个元素即可
+                scale_first = scale_boundaries[0][i] 
                 # print(len(scale_boundaries))
-                scale_last = scale_boundaries[i+1]  #scale_boundaries是累加的
+                scale_last = scale_boundaries[0][i+1]  #scale_boundaries是累加的
                 # overlap的维度比较多，第一个维度是bsz，因此需要全部使用，第二个维度是scale，只需要部分使用
-                #在这部分进行选中，而不是在Dataloader中就选中，是为了输入数据批量时保持统一？
                 gt = overlaps[:, scale_first:scale_last] #得到的是一维向量。overlaps是包含不同的query,所以之后的计算也得到的是不同query对应的结果？
                 
                 #sum(0)表示保持第一个维度要丢失，第一个维度不是bsz嘛？怎么能在这个维度上进行求和？
@@ -141,9 +140,6 @@ class SOONet(nn.Module):
         vq_ctn_scores = torch.sigmoid(torch.cat(vq_ctn_scores, dim=1))
         final_scores = torch.sigmoid(torch.cat(qv_merge_scores, dim=1))
 
-        #此处的损失使用的是所有的anchor区间和所有的overlaps,不是选中的部分
-        #但是还加入了stage2_overlaps的选择之后的损失
-        #最终就是论文中说的context-based和content-based的结合损失
         loss_dict = self.loss(qv_ctx_scores, qv_ctn_scores, vq_ctx_scores, vq_ctn_scores, bbox_bias,
                                timestamps, overlaps, stage2_overlaps, starts, ends, anchor_masks)
 
@@ -153,20 +149,16 @@ class SOONet(nn.Module):
                      query_feats=None,
                      query_masks=None,
                      video_feats=None,
-                     start_ts=None,  #start_ts,end_ts是指视频初始化进行scale切割时重新编造的时间戳
+                     start_ts=None,
                      end_ts=None,
                      scale_boundaries=None,
                      **kwargs):
-        #在测试的时候就没法使用overlap
-        test_gpu_st=time.time()
-        test_gpu=list()
-        test_cpu=list()
-        
+
         ori_ctx_feats = self.video_encoder(video_feats.permute(0, 2, 1))
         batch_size = self.cfg.TEST.BATCH_SIZE
         query_num = len(query_feats)
         num_batches = math.ceil(query_num / batch_size)
-        
+
         merge_scores, merge_bboxes = list(), list()
         for bid in range(num_batches):
             sent_feat = query_feats[bid*int(batch_size):(bid+1)*int(batch_size)]
@@ -177,12 +169,11 @@ class SOONet(nn.Module):
                 ends = list()
                 filtered_ctx_feats = list()
                 for i in range(self.nscales):
-                    scale_first = scale_boundaries[i]
-                    scale_last = scale_boundaries[i+1]
+                    scale_first = scale_boundaries[0][i]
+                    scale_last = scale_boundaries[0][i+1]
 
                     _, indices = torch.sort(qv_ctx_scores[i], dim=1, descending=True)
                     indices = indices[:, :self.stage2_topk]  #每一个层次都选择top-k个，开销也不小吧
-                    #每个尺度下，选择topk个
                     hit_indices.append(indices)
 
                     filtered_ctx_feats.append(fetch_feats_by_index(ori_ctx_feats[i].repeat(indices.size(0), 1, 1), indices))
@@ -192,7 +183,6 @@ class SOONet(nn.Module):
                 starts = torch.cat(starts, dim=1)
                 ends = torch.cat(ends, dim=1)
 
-                #hit_indices是一个列表，每个元素是一个(1,topk)的tensor，表示在一个尺度下的topk选择
                 qv_merge_scores, qv_ctn_scores, ctn_feats = self.q2v_stage2(
                     video_feats, sent_feat, hit_indices, qv_ctx_scores)
                 ctx_feats = filtered_ctx_feats 
@@ -202,18 +192,14 @@ class SOONet(nn.Module):
                 qv_merge_scores = qv_ctx_scores
                 starts = start_ts[bid*int(batch_size):(bid+1)*int(batch_size)]
                 ends = end_ts[bid*int(batch_size):(bid+1)*int(batch_size)]
-            #原本在训练中ctx,ctn也是列表的形式，每个元素表示在该尺度下的选择
-            #只不过测试阶段的选择数目对于每个尺度是一样的都是top-k,得到的结果是(query_length, total_num_anchors, 2),没有四个尺度独立的维度了
+            
             bbox_bias = self.regressor(ctx_feats, ctn_feats, sent_feat)
             final_scores = torch.sigmoid(torch.cat(qv_merge_scores, dim=1))
 
+
             pred_scores, pred_bboxes = list(), list()
-            test_gpu_et=time.time()
-            test_cpu_st=time.time()
-            #从GPU的内存转换到CPU上，为了使用numpy的高级索引功能
-            #将数据从GPU上转移到CPU上之后，就无法利用DDP的分布式加速，DDP的分布式加速依赖于进程在GPU上的并行计算能力
-            #一旦数据转移到CPU，就会变成单线程模式，无法利用多GPU的加速
-            final_scores = final_scores.cpu().numpy() 
+
+            final_scores = final_scores.cpu().numpy()
             starts = starts.cpu().numpy()
             ends = ends.cpu().numpy()
             bbox_bias = bbox_bias.cpu().numpy()
@@ -231,29 +217,18 @@ class SOONet(nn.Module):
 
             pred_scores = final_scores[np.arange(query_num)[:, None], rank_ids]
             pred_bboxes = np.stack([pred_start, pred_end], axis=2)
-            # print("pred_bboxes shape:",pred_bboxes.shape)  #6,400,2
-            if self.enable_nms:  #false
+            if self.enable_nms:
                 nms_res = list()
                 for i in range(query_num):
                     bbox_nms = self.nms(pred_bboxes[i], thresh=0.3, topk=self.topk)
                     nms_res.append(bbox_nms)
                 pred_bboxes = nms_res
             else:
-                #会计算每个尺度下100个anchor的时区，但是最终还要进行一次top 100的选择
-                pred_scores = pred_scores[:, :self.topk].tolist()  
+                pred_scores = pred_scores[:, :self.topk].tolist()
                 pred_bboxes = pred_bboxes[:, :self.topk, :].tolist()
-            
-            #此处得到的数据全是numpy在CPU上
+
             merge_scores.extend(pred_scores)
             merge_bboxes.extend(pred_bboxes)
-            
-            test_cpu_et=time.time()
-            test_gpu.append(test_gpu_et-test_gpu_st)
-            test_cpu.append(test_cpu_et-test_cpu_st)
-            test_gpu_st=time.time()
-            
-        # print("GPU time:",np.mean(test_gpu))   
-        # print("CPU time:",np.mean(test_cpu))
 
         return merge_scores, merge_bboxes
 
@@ -284,8 +259,7 @@ class SOONet(nn.Module):
             sbias = bbox_bias[:, :, 0]
             ebias = bbox_bias[:, :, 1]
             duration = ends - starts
-            #此处的duration不是整个视频的duration，而是这个anchor区间的duration
-            pred_start = starts + sbias * duration  
+            pred_start = starts + sbias * duration
             pred_end = ends + ebias * duration
 
             if self.cfg.MODEL.ENABLE_STAGE2:

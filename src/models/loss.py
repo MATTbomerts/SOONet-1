@@ -102,14 +102,19 @@ class IOULoss(nn.Module):
         self.reduce = cfg.LOSS.REGRESS.REDUCE
     
     def forward(self, pred_left, pred_right, target_left, target_right, mask):
-        target_left = target_left.repeat(1, pred_left.size(1))
+        #因为有多个anchor，但targte一般就一个，所以需要重复，在行数上(不同query)，对齐
+        #一个query可得到多个anchor开始结束时刻，也可能有多个timestamp（为了简便考虑只有一个的情况）
+        target_left = target_left.repeat(1, pred_left.size(1))  #针对预测的每个anchor的边界区间与真实相交程度比对
         target_right = target_right.repeat(1, pred_right.size(1))
+        
+        #torch.min逐元素比较大小，返回的维度和输入维度相同
+        #计算得到每个相交anchor与真实timestamp的交并比，暂时还没有选择最相近的结果
         intersect = torch.clamp(torch.min(target_right, pred_right) - torch.max(target_left, pred_left), 0)
         union = torch.clamp(torch.max(target_right, pred_right) - torch.min(target_left, pred_left), 0)
 
         iou = (intersect + 1e-8) / (union + 1e-8)
 
-        loss = -torch.log(iou)
+        loss = -torch.log(iou)  #每个anchor的边界损失都进行了考虑
         if self.reduce == "mean":
             loss = (loss * mask).sum() / (mask.sum() + 1e-8)
         elif self.reduce == "sum":

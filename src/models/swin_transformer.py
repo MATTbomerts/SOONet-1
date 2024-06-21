@@ -264,6 +264,7 @@ class SwinTransformerBlock_1D(nn.Module):
 
 
     def forward(self, x):
+        #输入维度和输出维度保持一致
         B, L, C = x.shape
 
         attn_mask = compute_mask(L, self.window_size, self.shift_size).to(x.device)
@@ -425,40 +426,37 @@ class PatchEmbed1D(nn.Module):
     def __init__(self, patch_size=4, in_chans=32, embed_dim=128, norm_layer=None):
         super().__init__()
         self.patch_size = patch_size
-
         self.in_chans = in_chans
         self.embed_dim = embed_dim
-
+        #embed_dim：输出通道数，不重叠采样
         self.proj = nn.Conv1d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-
         if norm_layer is not None:
             self.norm = norm_layer(embed_dim)
         else:
             self.norm = None
 
-    def forward(self, x):
+    def forward(self, x):  #bsz,hidden_dim,frames
         """Forward function."""
         # padding
         _, _, L = x.size()
         pad_r = (self.patch_size - L % self.patch_size) % self.patch_size
-        x = F.pad(x, (0, pad_r))
-        x = self.proj(x)  # B C Wl
+        x = F.pad(x, (0, pad_r)) #对输入向量向右填充，确保能被patch_size整除
+        x = self.proj(x)  # B C Wl  
         if self.norm is not None:
             # Wl = x.size(2)
             x = x.transpose(1, 2)
             x = self.norm(x)
             # x = x.transpose(1, 2).view(-1, self.embed_dim, Wl)
 
-        return x
+        return x  #输出结果 bsz,embed_dim, C0
 
 
 class SwinTransformerV2_1D(nn.Module):
-
     def __init__(self, 
-                 patch_size=4, 
-                 in_chans=32, 
+                 patch_size=4,   #传入进来的参数是10
+                 in_chans=32,   #
                  embed_dim=96, 
-                 depths=[2, 2, 6, 2], 
+                 depths=[2, 2, 6, 2],   #传入进来全2
                  num_heads=[3, 6, 12, 24],
                  window_size=7, 
                  mlp_ratio=4., 
@@ -480,6 +478,7 @@ class SwinTransformerV2_1D(nn.Module):
         self.mlp_ratio = mlp_ratio
 
         # split image into non-overlapping patches
+        #patch_size 4 ,in_chans 32, embed_dim 96
         self.patch_embed = PatchEmbed1D(
             patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
             norm_layer=norm_layer if self.patch_norm else None)
@@ -528,11 +527,12 @@ class SwinTransformerV2_1D(nn.Module):
         return {"cpb_mlp", "logit_scale", 'relative_position_bias_table'}
 
     def forward_features(self, x):
-        x = self.patch_embed(x)
-        x = self.pos_drop(x)
+        #输入时bsz, hidden_dim, frames
+        x = self.patch_embed(x)   #输出结果 bsz,embed_dim, C0 
+        x = self.pos_drop(x)  #会还原维度，bsz,none_overlap_snippet,hidden_dim
 
         proposals = list()
-        for layer in self.layers:
+        for layer in self.layers:  #一共四层尺度
             x, proposal = layer(x)
             proposals.append(proposal)
         

@@ -3,7 +3,7 @@ import random
 import logging, logging.handlers
 import coloredlogs
 import torch
-
+import time 
 
 def get_logger(name, log_file_path=None, fmt="%(asctime)s %(name)s: %(message)s",
                print_lev=logging.DEBUG, write_lev=logging.INFO):
@@ -50,7 +50,7 @@ def compute_overlap(pred, gt):
     pred_is_list = isinstance(pred[0], list)
     gt_is_list = isinstance(gt[0], list)
     pred = pred if pred_is_list else [pred]
-    gt = gt if gt_is_list else [gt]
+    gt = gt if gt_is_list else [gt]  #将其转换为列表中的列表，才能够使后面找每一对左边界最大值变为广播操作
     # compute overlap
     pred, gt = np.array(pred), np.array(gt)
     inter_left = np.maximum(pred[:, 0, None], gt[None, :, 0])
@@ -62,7 +62,7 @@ def compute_overlap(pred, gt):
     overlap = 1.0 * inter / union
     # reformat output
     overlap = overlap if gt_is_list else overlap[:, 0]
-    overlap = overlap if pred_is_list else overlap[0]
+    overlap = overlap if pred_is_list else overlap[0]  #输出得到每一对的重叠比例
     return overlap
 
 
@@ -137,6 +137,7 @@ class Evaluator(object):
         Return:
             correct: flag of correct at predefined tiou threshold [0.3,0.5,0.7]
         """
+        eval_metric_st=time.time()
         num_instances = float(len(preds))
         miou = 0
         all_rank = dict()
@@ -158,4 +159,6 @@ class Evaluator(object):
 
         # miou /= float(num_instances)
         
+        eval_metric_et=time.time()
+        print("eval_metric time: ",eval_metric_et-eval_metric_st)
         return all_rank, miou

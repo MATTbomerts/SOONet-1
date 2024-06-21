@@ -1,7 +1,7 @@
 SEED: 2022
 
 CUDNN:
-  DETERMINISTIC: False
+  DETERMINISTIC: True
   BENCHMARK: False
 
 DATASET: "mad"
@@ -40,18 +40,17 @@ OPTIMIZER:
   LR_DECAY: 0.1
   LR_DECAY_STEP: 40000
 
-
 TRAIN:
-  BATCH_SIZE: 32
-  WORKERS: 8
-  NUM_EPOCH: 20
+  BATCH_SIZE: 6
+  WORKERS: 12
+  NUM_EPOCH: 20  #用在mad dataset初始化数据集上的，init部分
   LOG_STEP: 200
-  EVAL_STEP: 2000
+  EVAL_STEP: 200
   
 TEST:
-  BATCH_SIZE: 64
-  WORKERS: 8
+  BATCH_SIZE: 6
+  WORKERS: 12
   TOPK: 100
-  EVAL_TOPKS: [1, 5, 10, 50, 100]
+  EVAL_TOPKS: [1, 5, 10, 50, 100]  #在验证的时候召回的个数不同，计算不同召回率下的性能
   EVAL_TIOUS: [0.1, 0.3, 0.5]
   
