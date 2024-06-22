@@ -218,10 +218,12 @@ class SOONet(nn.Module):
             ends = ends.cpu().numpy()
             bbox_bias = bbox_bias.cpu().numpy()
             
-            rank_ids = np.argsort(final_scores, axis=1)
-            rank_ids = rank_ids[:, ::-1]
+            rank_ids = np.argsort(final_scores, axis=1) #从小到大
+            rank_ids = rank_ids[:, ::-1] #逆序
             query_num = len(rank_ids)
-            ori_start = starts[np.arange(query_num)[:, None], rank_ids]
+            #高级索引，切片是(x,1)，后一个切片是(x,400)，结合起来就是starts[i:]按照rank_ids[i:]来进行选择
+            #关键是这个切片操作也不需要要求starts是Numpy啊？不是也可以在tensor上进行吗？
+            ori_start = starts[np.arange(query_num)[:, None], rank_ids] 
             ori_end = ends[np.arange(query_num)[:, None], rank_ids]
             duration = ori_end - ori_start
             sebias = bbox_bias[np.arange(query_num)[:, None], rank_ids]
@@ -254,10 +256,11 @@ class SOONet(nn.Module):
             
         # print("GPU time:",np.mean(test_gpu))   
         # print("CPU time:",np.mean(test_cpu))
-
+        #np.array相当于把列表的元素个数合并成bsz维度
+        # print("merge_scores shape:",np.array(merge_scores).shape)  #6,100
+        # print("merge_bboxes shape:",np.array(merge_bboxes).shape)  #6,100
         return merge_scores, merge_bboxes
 
-    
     def loss(self, 
              qv_ctx_scores, 
              qv_ctn_scores, 
