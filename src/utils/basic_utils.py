@@ -117,6 +117,7 @@ class Evaluator(object):
 
         best_tiou = 0
         for loc in pred:
+            # topk个候选中，逐个和真实区间标注进行IOU计算，通过for循环实现遍历，不能利用到向量化并行计算
             cur_tiou = compute_tiou(loc, gt)
 
             if cur_tiou > best_tiou:
